@@ -26,6 +26,8 @@ public class GoogleChatAppender extends UnsynchronizedAppenderBase<ILoggingEvent
     private static final BlockingDeque<ILoggingEvent> queue = new LinkedBlockingDeque<>();
     private static final HttpClient httpClient = HttpClient.newHttpClient();
 
+    private volatile boolean interruptedFlag;
+
     private String webhookUri;
     private Layout<ILoggingEvent> layout;
     private Logger logger;
@@ -41,17 +43,50 @@ public class GoogleChatAppender extends UnsynchronizedAppenderBase<ILoggingEvent
             }
         };
 
+        Thread workerThread = createWorkerThread();
+
+        createShutdownHook(workerThread);
+    }
+
+    private Thread createWorkerThread() {
         Thread workerThread = new Thread(() -> {
-            while (!Thread.interrupted()) {
+            while (true) {
                 try {
                     sendMessage(queue.take());
+                } catch (InterruptedException e) {
+                    interruptedFlag = true;
                 } catch (Exception e) {
                     recordLog("Error send message to GoogleChat", e);
+                    break;
+                }
+
+                if (isShutdown()) {
+                    break;
                 }
             }
         }, "google-chat-appender");
         workerThread.setDaemon(true);
         workerThread.start();
+        return workerThread;
+    }
+
+    private void createShutdownHook(Thread workerThread) {
+        Thread hookThread = new Thread(() -> {
+            interruptedFlag = true;
+            workerThread.interrupt();
+
+            try {
+                workerThread.join();
+            } catch (Exception e) {
+                recordLog("Error shutdown hook", e);
+            }
+        }, "shutdown-hook-thread");
+
+        Runtime.getRuntime().addShutdownHook(hookThread);
+    }
+
+    private boolean isShutdown() {
+        return queue.isEmpty() && interruptedFlag;
     }
 
     @Override
